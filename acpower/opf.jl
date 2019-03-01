@@ -1,10 +1,11 @@
 using JuMP
 using Ipopt
 using Compat
+using DelimitedFiles
 
-type Bus
+mutable struct Bus
     bustype::Int
-    name::ASCIIString
+    name::String
     voltage0::Float64
     angle0::Float64
     p_gen::Float64
@@ -21,7 +22,7 @@ type Bus
     area::Float64
 end
 
-type Branch
+mutable struct Branch
     from::Int
     to::Int
     branchtype::Int
@@ -43,16 +44,16 @@ function opf(bus, branch,
     branch_tap_min, branch_tap_max,
     p_gen_upper, p_gen_lower)
 
-    mod = Model(solver=IpoptSolver(max_iter=3),simplify_nonlinear_expressions=true)
+    model = Model(with_optimizer(Ipopt.Optimizer, max_iter=3))
 
     nbus = length(bus)
     nbranch = length(branch)
-    @defVar(mod, bus_voltage_min[bus[i].bustype] <= bus_voltage[i=1:nbus] <= bus_voltage_max[bus[i].bustype], start=1)
-    @defVar(mod, bus[i].b_shunt_min <= bus_b_shunt[i=1:nbus] <= bus[i].b_shunt_max, start=bus[i].b_shunt0)
-    @defVar(mod, bus_angle[1:nbus], start=0)
+    @variable(model, bus_voltage_min[bus[i].bustype] <= bus_voltage[i=1:nbus] <= bus_voltage_max[bus[i].bustype], start=1)
+    @variable(model, bus[i].b_shunt_min <= bus_b_shunt[i=1:nbus] <= bus[i].b_shunt_max, start=bus[i].b_shunt0)
+    @variable(model, bus_angle[1:nbus], start=0)
 
-    @defVar(mod, branch_tap_min <= branch_tap[1:nbranch] <= branch_tap_max, start=1)
-    @defVar(mod, branch[i].def_min <= branch_def[i=1:nbranch] <= branch[i].def_max, start = branch[i].def0)
+    @variable(model, branch_tap_min <= branch_tap[1:nbranch] <= branch_tap_max, start=1)
+    @variable(model, branch[i].def_min <= branch_def[i=1:nbranch] <= branch[i].def_max, start = branch[i].def0)
 
     in_lines = [Int[] for i in 1:nbus] # indices of incoming branches
     out_lines = [Int[] for i in 1:nbus] # indices of outgoing branches
@@ -65,115 +66,117 @@ function opf(bus, branch,
         @assert 1 <= b.to <= nbus
     end
 
-    @defNLExpr(mod, Gself[k=1:nbus],
+    @NLexpression(model, Gself[k=1:nbus],
         bus[k].g_shunt +
-        sum{branch[i].g*branch_tap[i]^2, i=out_lines[k]} +
-        sum{ branch[i].g, i=in_lines[k]})
+        sum(branch[i].g*branch_tap[i]^2 for i in out_lines[k]) +
+        sum( branch[i].g for i in in_lines[k]))
 
-    @defNLExpr(mod, Gout[i=1:nbranch],
+    @NLexpression(model, Gout[i=1:nbranch],
         (-branch[i].g*cos(branch_def[i])+branch[i].b*sin(branch_def[i]))*branch_tap[i])
-    @defNLExpr(mod, Gin[i=1:nbranch],
+    @NLexpression(model, Gin[i=1:nbranch],
         (-branch[i].g*cos(branch_def[i])-branch[i].b*sin(branch_def[i]))*branch_tap[i])
 
-    @defNLExpr(mod, Bself[k=1:nbus],
+    @NLexpression(model, Bself[k=1:nbus],
         bus_b_shunt[k] +
-        sum{branch[i].b*branch_tap[i]^2 + branch[i].c/2, i=out_lines[k]} +
-        sum{ branch[i].b + branch[i].c/2, i=in_lines[k]})
+        sum(branch[i].b*branch_tap[i]^2 + branch[i].c/2 for i in out_lines[k]) +
+        sum( branch[i].b + branch[i].c/2 for i in in_lines[k]))
 
-    @defNLExpr(mod, Bin[i=1:nbranch],
+    @NLexpression(model, Bin[i=1:nbranch],
         (branch[i].g*sin(branch_def[i])-branch[i].b*cos(branch_def[i]))*branch_tap[i])
-    @defNLExpr(mod, Bout[i=1:nbranch],
+    @NLexpression(model, Bout[i=1:nbranch],
         (-branch[i].g*sin(branch_def[i])-branch[i].b*cos(branch_def[i]))*branch_tap[i])
 
     # Minimize active power
 
-    @setNLObjective(mod, Min, sum{ (bus[k].p_load +
-        sum{ bus_voltage[k] * bus_voltage[branch[i].from] *
+    @NLobjective(model, Min, sum( (bus[k].p_load +
+        sum( bus_voltage[k] * bus_voltage[branch[i].from] *
             (Gin[i] * cos(bus_angle[k] - bus_angle[branch[i].from]) +
-             Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])), i=in_lines[k] } +
-        sum{ bus_voltage[k] * bus_voltage[branch[i].to] *
+             Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])) for i in in_lines[k] ) +
+        sum( bus_voltage[k] * bus_voltage[branch[i].to] *
             (Gout[i] * cos(bus_angle[k] - bus_angle[branch[i].to]) +
-             Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])), i=out_lines[k] }
-        + bus_voltage[k]^2*Gself[k] )^2,
-        k in 1:nbus; bus[k].bustype == 2 || bus[k].bustype == 3})
+             Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])) for i in out_lines[k] )
+        + bus_voltage[k]^2*Gself[k] )^2
+        for k in 1:nbus if bus[k].bustype == 2 || bus[k].bustype == 3))
+
     for k in 1:nbus
         bus[k].bustype == 0 || continue
         # p_load
-        @addNLConstraint(mod, bus[k].p_gen - bus[k].p_load -
-            sum{ bus_voltage[k] * bus_voltage[branch[i].from] *
+        @NLconstraint(model, bus[k].p_gen - bus[k].p_load -
+            sum( bus_voltage[k] * bus_voltage[branch[i].from] *
                 (Gin[i] * cos(bus_angle[k] - bus_angle[branch[i].from]) +
-                 Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])), i=in_lines[k] } -
-            sum{ bus_voltage[k] * bus_voltage[branch[i].to] *
+                 Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])) for i in in_lines[k] ) -
+            sum( bus_voltage[k] * bus_voltage[branch[i].to] *
                 (Gout[i] * cos(bus_angle[k] - bus_angle[branch[i].to]) +
-                 Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])), i=out_lines[k] }
+                 Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])) for i in out_lines[k] )
             - bus_voltage[k]^2*Gself[k] == 0)
         # q_load
-        @addNLConstraint(mod, bus[k].q_gen - bus[k].q_load -
-            sum{ bus_voltage[k] * bus_voltage[branch[i].from] *
+        @NLconstraint(model, bus[k].q_gen - bus[k].q_load -
+            sum( bus_voltage[k] * bus_voltage[branch[i].from] *
                 (Gin[i] * sin(bus_angle[k] - bus_angle[branch[i].from]) -
-                 Bin[i] * cos(bus_angle[k] - bus_angle[branch[i].from])), i=in_lines[k] } -
-            sum{ bus_voltage[k] * bus_voltage[branch[i].to] *
+                 Bin[i] * cos(bus_angle[k] - bus_angle[branch[i].from])) for i in in_lines[k] ) -
+            sum( bus_voltage[k] * bus_voltage[branch[i].to] *
                 (Gout[i] * sin(bus_angle[k] - bus_angle[branch[i].to]) -
-                 Bout[i] * cos(bus_angle[k] - bus_angle[branch[i].to])), i=out_lines[k] }
+                 Bout[i] * cos(bus_angle[k] - bus_angle[branch[i].to])) for i in out_lines[k] )
              + bus_voltage[k]^2*Bself[k] == 0)
     end
+
     for k in 1:nbus
         (bus[k].bustype == 2 || bus[k].bustype == 3) || continue
         # q_inj
-        @addNLConstraint(mod, bus[k].q_min <= bus[k].q_load +
-            sum{ bus_voltage[k] * bus_voltage[branch[i].from] *
+        @NLconstraint(model, bus[k].q_min <= bus[k].q_load +
+            sum( bus_voltage[k] * bus_voltage[branch[i].from] *
                 (Gin[i] * sin(bus_angle[k] - bus_angle[branch[i].from]) -
-                 Bin[i] * cos(bus_angle[k] - bus_angle[branch[i].from])), i=in_lines[k] } +
-            sum{ bus_voltage[k] * bus_voltage[branch[i].to] *
+                 Bin[i] * cos(bus_angle[k] - bus_angle[branch[i].from])) for i in in_lines[k] ) +
+            sum( bus_voltage[k] * bus_voltage[branch[i].to] *
                 (Gout[i] * sin(bus_angle[k] - bus_angle[branch[i].to]) -
-                 Bout[i] * cos(bus_angle[k] - bus_angle[branch[i].to])), i=out_lines[k] } +
+                 Bout[i] * cos(bus_angle[k] - bus_angle[branch[i].to])) for i in out_lines[k] ) +
             - bus_voltage[k]^2*Bself[k] <= bus[k].q_max)
         # p_inj
-        @addNLConstraint(mod, 0 <= bus[k].p_load +
-            sum{ bus_voltage[k] * bus_voltage[branch[i].from] *
+        @NLconstraint(model, 0 <= bus[k].p_load +
+            sum( bus_voltage[k] * bus_voltage[branch[i].from] *
                 (Gin[i] * cos(bus_angle[k] - bus_angle[branch[i].from]) +
-                 Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])), i=in_lines[k] } +
-            sum{ bus_voltage[k] * bus_voltage[branch[i].to] *
+                 Bin[i] * sin(bus_angle[k] - bus_angle[branch[i].from])) for i in in_lines[k] ) +
+            sum( bus_voltage[k] * bus_voltage[branch[i].to] *
                 (Gout[i] * cos(bus_angle[k] - bus_angle[branch[i].to]) +
-                 Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])), i=out_lines[k] } +
+                 Bout[i] * sin(bus_angle[k] - bus_angle[branch[i].to])) for i in out_lines[k] ) +
             + bus_voltage[k]^2*Gself[k] <= p_gen_upper*bus[k].p_gen)
     end
 
     for i in 1:nbus
         #---- FREEZE THE REFERENCE BUS ANGLE TO ZERO.
         if bus[i].bustype == 3
-            setLower(bus_angle[i], 0.0)
-            setUpper(bus_angle[i], 0.0)
+            set_lower_bound(bus_angle[i], 0.0)
+            set_upper_bound(bus_angle[i], 0.0)
         end
         #---- FREEZE ANY DISPATCHABLE SHUNTS.
         if bus[i].b_dispatch == 0
-            setLower(bus_b_shunt[i],bus[i].b_shunt0)
-            setUpper(bus_b_shunt[i],bus[i].b_shunt0)
+            set_lower_bound(bus_b_shunt[i],bus[i].b_shunt0)
+            set_upper_bound(bus_b_shunt[i],bus[i].b_shunt0)
         end
     end
 
     for i in 1:nbranch
         #---- FREEZE ANY BRANCH TAPS.
         if branch[i].branchtype == 0 || branch[i].branchtype == 3
-            setLower(branch_tap[i],1)
-            setUpper(branch_tap[i],1)
+            set_lower_bound(branch_tap[i],1)
+            set_upper_bound(branch_tap[i],1)
         end
         #---- FREEZE CERTAIN PHASE SHIFTERS.
         if branch[i].branchtype != 4
-            setLower(branch_def[i],getValue(branch_def[i]))
-            setUpper(branch_def[i],getValue(branch_def[i]))
+            set_lower_bound(branch_def[i], start_value(branch_def[i]))
+            set_upper_bound(branch_def[i], start_value(branch_def[i]))
         end
     end
 
 
     println("solving")
-    solve(mod)
+    optimize!(model)
 
 end
 
 function prepdata(bus, branch)
 
-    buses = Array(Bus,size(bus,1))
+    buses = Array{Bus}(undef, size(bus, 1))
     refbus = 0
     shunt = 0
     busmap = Dict()
@@ -199,7 +202,7 @@ function prepdata(bus, branch)
     @show shunt
 
 
-    branches = Array(Branch,size(branch,1))
+    branches = Array{Branch}(undef, size(branch, 1))
     branchtap = 0
     phaseshift = 0
     for i in 1:size(branch,1)

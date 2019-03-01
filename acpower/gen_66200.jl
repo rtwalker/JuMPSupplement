@@ -1,5 +1,6 @@
+using DelimitedFiles
 #bus = readdlm("IEEE014.bus")
-bus = readdlm("IEEE662.bus",ASCIIString)
+bus = readdlm("IEEE662.bus", String)
 busmap = Dict()
 for i in 1:size(bus,1)
     @assert !haskey(busmap, bus[i,1])
@@ -10,7 +11,7 @@ end
 
 
 #branch = readdlm("IEEE014.branch")
-branch = readdlm("IEEE662.branch",ASCIIString)
+branch = readdlm("IEEE662.branch", String)
 #branches = Array(Branch,size(branch,1))
 for i in 1:size(branch,1)
     #branches[i] = Branch(branch[i,2:end]...,0,0)
@@ -34,18 +35,18 @@ newbranch = vcat([branch for i in 1:NREP]...)
 
 for i in 1:nbus
     for k in 1:NREP
-        @assert int(newbus[i+(k-1)*nbus,1]) == i
+        @assert parse(Int, newbus[i+(k-1)*nbus,1]) == i
         newbus[i+(k-1)*nbus,1] = string(i+(k-1)*nbus)
     end
 end
 
 for i in 1:nbranch
     for k in 1:NREP
-        @assert 1 <= int(newbranch[i+(k-1)*nbranch,2]) <= nbus
-        @assert 1 <= int(newbranch[i+(k-1)*nbranch,3]) <= nbus
+        @assert 1 <= parse(Int, newbranch[i+(k-1)*nbranch,2]) <= nbus
+        @assert 1 <= parse(Int, newbranch[i+(k-1)*nbranch,3]) <= nbus
         newbranch[i+(k-1)*nbranch,1] = string(i+(k-1)*nbranch)
-        newbranch[i+(k-1)*nbranch,2] = string(int(newbranch[i+(k-1)*nbranch,2])+(k-1)*nbus)
-        newbranch[i+(k-1)*nbranch,3] = string(int(newbranch[i+(k-1)*nbranch,3])+(k-1)*nbus)
+        newbranch[i+(k-1)*nbranch,2] = string(parse(Int, newbranch[i+(k-1)*nbranch,2])+(k-1)*nbus)
+        newbranch[i+(k-1)*nbranch,3] = string(parse(Int, newbranch[i+(k-1)*nbranch,3])+(k-1)*nbus)
     end
 end
 
